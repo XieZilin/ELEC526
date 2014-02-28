@@ -400,7 +400,8 @@ void UpdateCache( struct memrec *req) {
   char *blockdata;
 
   set_index = (req->address >> BLKSIZE)% NUMSETS;
-  way = req->cacheway; 
+ // way = req->cacheway;
+  way = GetVictim(set_index); 
   my_tag = (req->address >> BLKSIZE)/NUMSETS;
   type = req->type; 
   
@@ -566,7 +567,7 @@ int ServiceMemRequest() {
    *                   When the memory access completes the Dispatch Process should wake up the waiting thread.
    */
 
-  
+ 
   SemaphoreWait(sem_cacheaccess);   /*  Make sure only one entity is manipulating the cache at any time */
 
   HandleCacheMiss(memreq);
