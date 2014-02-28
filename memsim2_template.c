@@ -9,7 +9,7 @@
 #define READ 1
 #define WRITE 0
 
-#define TRACE TRUE
+#define TRACE FALSE
 
 
 #define MAX_NUM_THREADS 2  // Must be less than 10
@@ -20,11 +20,11 @@
 #define CACHE_HIT_TIME 1.0
 #define CACHE_MISS_TIME  50.0
 #define CACHE_FLUSH_TIME 50.0
-#define CPU_DELAY 0.0
+static double CPU_DELAY = 0.0;
 #define WRITE_BUFFER_DELAY  1.0
 #define FLUSH_WRITE_DELAY  0.05
 
-#define CACHESIZE 2 // Size in Blocks
+#define CACHESIZE 32 // Size in Blocks
 #define NUMWAYS 1
 #define NUMSETS  CACHESIZE/NUMWAYS
 #define BLKSIZE 5  // 2^5 = 32 bytes per block
@@ -400,8 +400,8 @@ void UpdateCache( struct memrec *req) {
   char *blockdata;
 
   set_index = (req->address >> BLKSIZE)% NUMSETS;
- // way = req->cacheway;
-  way = GetVictim(set_index); 
+  //way = req->cacheway;
+  way=GetVictim(set_index);
   my_tag = (req->address >> BLKSIZE)/NUMSETS;
   type = req->type; 
   
@@ -416,10 +416,7 @@ void UpdateCache( struct memrec *req) {
   /* *********************************  MEMORY DISPATCHER  FUNCTIONS  *************************************** */
 
 
-
-
 void DispatchMemoryRequest(){
-
   /* ****************************************************
    * Called to dispatch a new request to the memory unit.
    * Use the following policy to select a request:
@@ -435,33 +432,31 @@ void DispatchMemoryRequest(){
    *         Install the new block into the cache when safe to do so and update cache
    *         Wake up all (possibly piggybacked) threads waiting for this block
    ******************************************************* */
-   struct qentry q = loadQ[loadQHead];
-   struct qentry *p;
-   int job_num;
    
-   if(writeQCount > WRITE_THRESHOLD || loadQCount <= 0){//write
-        ProcessDelay( CACHE_FLUSH_TIME );
-        GetDeleteWriteQ();
-        SemaphoreSignal(sem_writebufferfull);
+   
+   if (writeQCount > WRITE_THRESHOLD||loadQCount<=0)
+   {
+      //write
+      ProcessDelay(CACHE_FLUSH_TIME);
+      GetDeleteWriteQ();
+      SemaphoreSignal(sem_writebufferfull);
+   }else{
+      //read
+      ProcessDelay(CACHE_MISS_TIME);
+
+      struct qentry* data = GetDeleteLoadQueue();
+      // install new block  
+      SemaphoreWait(sem_cacheaccess); 
+      UpdateCache(data->data);
+      SemaphoreSignal(sem_cacheaccess);
+      while(data!=NULL){
+        SemaphoreSignal(sem_memdone[((struct memrec *)data->data)->thread_id]);
+	     data=data->next;
+      }
+      SemaphoreSignal(sem_loadbufferfull);
+      //wake up all
    }
-   else{//read
-        //Delay by  CACHE_MISS_TIME  and delete it from the Load Queue
-        ProcessDelay( CACHE_MISS_TIME );
-        p = GetDeleteLoadQueue();
-       
-        
-        //Install the new block into the cache when safe to do so and update cache
-        SemaphoreWait( sem_cacheaccess );
-        UpdateCache(p -> data);
-        SemaphoreWait( sem_cacheaccess );
-        
-        while(p != NULL){
-             job_num = ((struct memrec *)p->data)->thread_id;
-             SemaphoreSignal(sem_memdone[job_num]);
-            p = p->next;
-        }
-        SemaphoreSignal(sem_loadbufferfull);        
-   }
+   
 }
 
 
@@ -469,85 +464,49 @@ void DispatchMemoryRequest(){
   /* *********************************  MEMORY CONTROLLER FUNCTIONS  *************************************** */
 
 
-void HandleCacheMiss(struct memrec *req){
-  unsigned set_index, my_tag;
-  int type, way;
-  char *blockdata;
-
-  set_index = (req->address >> BLKSIZE)% NUMSETS;
-  my_tag = (req->address >> BLKSIZE)/NUMSETS;
-  type = req->type;  // Read (1) or Write (0)
-  way = GetVictim(set_index);
-
-  if (CACHE[set_index][way].D == TRUE) {      // This implementation does not actually write the dirty block.
+void HandleCacheMiss(struct memrec *memreq){
+  int block_num = (memreq->address) >> BLKSIZE;
+  unsigned set_index = block_num % NUMSETS;
+  unsigned my_tag = block_num / NUMSETS;
+  int type = memreq->type;
+  int way = GetVictim(set_index);
+  if (CACHE[set_index][way].D == TRUE)
+  {
     totalFlushes++;
     FlushDirtyBlock(set_index, way);
   }
-
-  unsigned block_number;
-  block_number = (req->address) >> BLKSIZE;
-  
-  if(isInWriteQ(block_number)){
-    UpdateCache(req);
-    ProcessDelay( WRITE_BUFFER_DELAY );
-    SemaphoreSignal( sem_memdone[req->thread_id] );
-  }
-  else {
-    int inload = isInLoadQueue(req->address);
-    SemaphoreWait(sem_loadbufferfull);
-    PutInLoadQ(inload, req);
-    if(inload == -1){
-        SemaphoreSignal(sem_memory);
+  //read?
+  if (isInWriteQ(block_num))
+  {
+    UpdateCache(memreq);
+    ProcessDelay(WRITE_BUFFER_DELAY);
+    SemaphoreSignal(sem_memdone[memreq->thread_id]);
+  }else{
+    int my_index = isInLoadQueue(memreq->address);
+    PutInLoadQ(my_index, memreq);
+    if (my_index==-1)
+    {
+      SemaphoreWait(sem_loadbufferfull);
+      SemaphoreSignal(sem_memory);
     }
-  } 
-
-  
+  }
   if (TRACE)
     printf("In HandleCacheMiss at time %5.2f\n", GetSimTime());
 
 }
 
-
-/* ************************************************  */
-
 void FlushDirtyBlock(int set_index, int way) {
-  /*
-1. Iinvalidate the cache line being flushed.
-
-2.  Compute the block number of the block being evicted from the cache.
-
-3. Append this request to the tail of a write buffer by calling the 
-function PutInWriteQ( ) provided, if there is space in the write buffer.
-if there is no space in the queue wait until there is space. If done
-correctly, the memory writer process will at some point complete
-a memory write from the buffer and free up space. It may be easiest 
-to use a semaphore initialized to the size of the queue to control 
-access to the queue, but feel free to choose your own mechanism.
-
-4. Signal the background writing thread to indicate there is another request in the queue.
-  */
-
   CACHE[set_index][way].V = FALSE;
-  unsigned my_tag = CACHE[set_index][way].TAG;
-  unsigned block_num = set_index + my_tag * NUMSETS;
-
+  unsigned temp_tag = CACHE[set_index][way].TAG;
+  unsigned block_num = set_index + temp_tag * NUMSETS;
   SemaphoreWait(sem_writebufferfull);
   PutInWriteQ(block_num);
   SemaphoreSignal(sem_memory);
-
-
-  
-     
-  if (TRACE)
-    printf("In function FlushDirtyBlock  at time %5.2f\n", GetSimTime());
 }
 
 int ServiceMemRequest() {
 
   struct memrec *memreq;
-  
-  memreq = GetFromMemQ();
-
   /* Handle the cache miss for the request (mem_req) at the head of the Memory Queue 
    * Invalidate and flush the cache block if necessary
    *                      Add write request to tail of Write Queue
@@ -566,8 +525,13 @@ int ServiceMemRequest() {
    *                   Return immediately after placing request in the Load Queue 
    *                   When the memory access completes the Dispatch Process should wake up the waiting thread.
    */
-
- 
+	
+	memreq = GetFromMemQ();
+  if (memreq == NULL){
+    printf("ERROR: No Memory Request To Service\n");
+      exit(1);
+  }
+  //wake up?
   SemaphoreWait(sem_cacheaccess);   /*  Make sure only one entity is manipulating the cache at any time */
 
   HandleCacheMiss(memreq);
@@ -674,12 +638,18 @@ void processor() {
   /* ************************************************************************************ */
   /* ************************************************************************************ */
 
+char *Initialize(int argc, char *argv[])  {
+	if (argc > 1)   {CPU_DELAY = atof(argv[1]);}
+	  printf("CpuDelay=%f", CPU_DELAY);
+}
+
 
 void UserMain(int argc, char *argv[])
 {
   void memorycontroller(), processor(), memorydispatcher();
   int i;
 
+  Initialize(argc,argv);
   /* *********************************  PROCESSES *************************************** */
   // Create a process to model the activities of the processor
     for (i=0; i < MAX_NUM_THREADS; i++) {
@@ -711,6 +681,7 @@ void UserMain(int argc, char *argv[])
   
   sem_memory = NewSemaphore("semmemory", 0); // Used by Memory Controller to  signal Memory Dispatcher with a new (non-piggybacked) request  
  
+
   for (i=0; i < MAX_NUM_THREADS; i++) 
     sem_memdone[i] = NewSemaphore("memdone",0); // Used to signal Processor Thread that cache miss handling is complete
 
@@ -734,5 +705,6 @@ void UserMain(int argc, char *argv[])
     DriverRun(1000000000.0); // Maximum time of the simulation (in cycles).   
      printStatistics(TRUE); 
 }
+
 
 
