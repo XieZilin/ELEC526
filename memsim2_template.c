@@ -20,7 +20,7 @@
 #define CACHE_HIT_TIME 1.0
 #define CACHE_MISS_TIME  50.0
 #define CACHE_FLUSH_TIME 50.0
-#define CPU_DELAY 0.0
+#define CPU_DELAY 7.0
 #define WRITE_BUFFER_DELAY  1.0
 #define FLUSH_WRITE_DELAY  0.05
 
@@ -410,7 +410,6 @@ void UpdateCache( struct memrec *req) {
 }
 
 
-
 void FlushDirtyBlock(int set_index, int way) {
 
 	CACHE[set_index][way].V = FALSE;
@@ -424,30 +423,34 @@ void FlushDirtyBlock(int set_index, int way) {
 	if (TRACE)
 		printf("In function FlushDirtyBlock  at time %5.2f\n", GetSimTime());
 }
+
   /* *********************************  MEMORY DISPATCHER  FUNCTIONS  *************************************** */
+
+
+
 
 void DispatchMemoryRequest(){
 	struct qentry *q;
 	struct memrec *req;
-	if (writeQCount > WRITE_THRESHOLD||loadQCount<=0){
+	if (writeQCount > WRITE_THRESHOLD || loadQCount <= 0){
 		ProcessDelay(CACHE_FLUSH_TIME);
 		GetDeleteWriteQ();
 		SemaphoreSignal(sem_writebufferfull);
 	}
 	else{
 		ProcessDelay(CACHE_MISS_TIME);
-		struct qentry *q = GetDeleteLoadQueue();
-    struct memrec *req = q->data;
+		q = GetDeleteLoadQueue();
+		req = q->data;
 		SemaphoreWait(sem_cacheaccess);
 		UpdateCache(req);
 		SemaphoreSignal(sem_cacheaccess);
-   //SemaphoreSignal(sem_loadbufferfull);
-    while(q != NULL){
-		SemaphoreSignal(sem_memdone[req->thread_id]);
-    SemaphoreSignal(sem_loadbufferfull);
-    q = q->next;
-    }
-    
+		//SemaphoreSignal(sem_loadbufferfull);
+		while (q != NULL){
+			req = q->data;
+			SemaphoreSignal(sem_memdone[req->thread_id]);
+			SemaphoreSignal(sem_loadbufferfull);
+			q = q->next;
+		}
 	}
   /* ****************************************************
    * Called to dispatch a new request to the memory unit.
@@ -478,13 +481,14 @@ void HandleCacheMiss(struct memrec *req){
 	block_number = (req->address) >> BLKSIZE;
 	set_index = block_number % NUMSETS;
 	my_tag = block_number / NUMSETS;
+	req->cacheway = GetVictim(set_index);
 	way = GetVictim(set_index);
 	if (CACHE[set_index][way].D == TRUE){
 		totalFlushes++;
 		FlushDirtyBlock(set_index, way);
 	}
 	if (isInWriteQ(block_number)){
-  //  ProcessDelay(50.0);
+		//ProcessDelay(50);
 		UpdateCache(req);
 		ProcessDelay(WRITE_BUFFER_DELAY);
 		SemaphoreSignal(sem_memdone[req->thread_id]);
@@ -492,22 +496,18 @@ void HandleCacheMiss(struct memrec *req){
 	}
 	else{
 		int place = isInLoadQueue(req->address);
-    if(place != -1){
-      PutInLoadQ(place, req);
-    }
-    else if(place == -1){
-      SemaphoreWait(sem_loadbufferfull);
-      PutInLoadQ(-1, req);
-      SemaphoreSignal(sem_memory);
-     }
+		if (place != -1){
+			PutInLoadQ(place, req);
+		}
+		else{
+			SemaphoreWait(sem_loadbufferfull);
+			PutInLoadQ(-1, req);
+			SemaphoreSignal(sem_memory);
+		}
    }
-		
 
-
-
-
-	if (TRACE)
-		printf("In HandleCacheMiss at time %5.2f\n", GetSimTime());
+  if (TRACE)
+    printf("In HandleCacheMiss at time %5.2f\n", GetSimTime());
 
 }
 
